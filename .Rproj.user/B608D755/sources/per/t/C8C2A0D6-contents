@@ -1,0 +1,514 @@
+##--- Step 3: Install and Load Necessary Packages ---
+
+# Install packages. You only need to run these installation commands once per computer.
+# If you've installed them before, you can skip this block.
+install.packages("tidyverse")   # For data manipulation (dplyr) and reading CSVs (readr)
+install.packages("lubridate")  # For easy date handling
+install.packages("ggplot2")    # For creating professional-looking plots (part of tidyverse, but good to ensure)
+install.packages("scales")# For formatting plot axes (e.g., adding commas to large numbers)
+install.packages("ggrepel")#help prevent overlapping of lines
+
+##--- Load packages for this session. You need to run these 'library()' commands---
+# every time you open RStudio and start working on this project.
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+library(scales) # Needed for scales::comma
+library(ggrepel)
+
+## ---- STEP 3_CREATING_MASTERTABLE_EXCEL----
+
+
+## ---- 04_Load_Your_Data ----
+#Over here i loaded the data (csv folder) 
+
+df <- read_csv("TOTAL_FUNDHOUSE_DATA.xlsx - TABLE.csv")
+# Just checking if everything is alright the data loaded is correct 
+head(df)       # Show the first 6 rows
+colnames(df)   # List all column names (important to check for exact spelling)
+glimpse(df)    # Show column names and their detected data types - (ALL ARE OF CHR TYPES. CONVERT THE DATA)
+# Check the data type of the DATE column right after loading
+print(typeof(df$DATE))
+# Print the first few entries again (just to be sure)
+print(head(df$DATE))
+# Create a new temporary column 'DATE_cleaned' by trimming spaces and then parsing
+df$DATE_cleaned <- lubridate::dmy(stringr::str_trim(df$DATE)) #this is uneeded and never used henceforth
+#above column DATE_cleaned is due for a change. Remove this code. 
+
+
+## ---- 05_Data_Cleaning_and_Preparation ----
+# cleaning data. CONVERTING THE DATE column to proper date format instead of making a NEW column 
+
+# 1. Convert the 'DATE' column to a proper date format (DD/MM/YYYY)
+
+df <- df %>%
+  mutate(DATE = dmy(stringr::str_trim(DATE))) # Added str_trim() remove invisibile trailing spaces
+
+# --- Standardize Fund House, Scheme Category, and Scheme Sub-Category Names (convert to all uppercase and handle NAs) ---
+df <- df %>%
+  mutate(
+    `FUND HOUSE` = toupper(`FUND HOUSE`), # Converts all text in 'FUND HOUSE' to uppercase
+    `SCHEME CATEGORY` = toupper(`SCHEME CATEGORY`),     ## Converts Scheme Category to uppercase
+    `SCHEME SUB-CATEGORY` = toupper(`SCHEME SUB-CATEGORY`) ## Converts Scheme Sub-Category to uppercase
+  ) %>%
+  #Replace NA values in categorical columns with a descriptive string
+  mutate(
+    `FUND HOUSE` = replace_na(`FUND HOUSE`, "UNKNOWN FUND HOUSE"),                   # Handles NA in Fund House
+    `SCHEME CATEGORY` = replace_na(`SCHEME CATEGORY`, "UNKNOWN SCHEME CATEGORY"),   #Handles NA in Scheme Category
+    `SCHEME SUB-CATEGORY` = replace_na(`SCHEME SUB-CATEGORY`, "UNKNOWN SCHEME SUB-CATEGORY") # Handles NA in Scheme Sub-Category
+  )
+
+# 2. Clean and Convert AUM Columns to Numeric
+#POINT FOR MYSELF:- when we come across numbers with commas, R reads them as characters. Not numbers.
+#gsub(pattern,replacement,column) helps to rid of commas
+df <- df %>%
+  mutate(
+    `THROUGH DIRECT PLAN` = as.numeric(gsub(",", "", `THROUGH DIRECT PLAN`)),
+    `THROUGH ASSOCIATE DISTRIBUTORS` = as.numeric(gsub(",", "", `THROUGH ASSOCIATE DISTRIBUTORS`)),
+    `THROUGH NON ASSOCIATE DISTRIBUTORS` = as.numeric(gsub(",", "", `THROUGH NON ASSOCIATE DISTRIBUTORS`)),
+    `Grand Total` = as.numeric(gsub(",", "", `Grand Total`))
+  ) %>%
+  # After converting to numeric, replace any NA values (e.g., from empty cells or failed conversions) with 0
+  mutate(
+    `THROUGH DIRECT PLAN` = replace_na(`THROUGH DIRECT PLAN`, 0),
+    `THROUGH ASSOCIATE DISTRIBUTORS` = replace_na(`THROUGH ASSOCIATE DISTRIBUTORS`, 0),
+    `THROUGH NON ASSOCIATE DISTRIBUTORS` = replace_na(`THROUGH NON ASSOCIATE DISTRIBUTORS`, 0),
+    `Grand Total` = replace_na(`Grand Total`, 0)
+  )
+
+# Verify column types after conversion 
+glimpse(df)
+
+## ---- 06_Aggregate_Data ----
+# Calulcates monthly totals for the diff. households
+
+# A. Aggregate Total AUM by Month and Fund House
+# We'll sum the 'Grand Total' for each fund house per month.
+aum_by_fundhouse <- df %>% 
+  # Create a 'Month_Year' column representing the first first day of each month for grouping
+  mutate(Month_Year = floor_date(DATE, "month")) %>%
+  filter(!is.na(Month_Year)) %>% 
+  group_by(Month_Year, `FUND HOUSE`) %>%
+  summarise(Total_AUM = sum(`Grand Total`, na.rm = TRUE), .groups = 'drop') %>%
+  arrange(`FUND HOUSE`, Month_Year) # Ensure chronological order for forecasting
+
+print("Aggregated AUM by Fund House:")
+print(aum_by_fundhouse)
+
+# B. Aggregate Total AUM by Month and Distributor Type
+# This requires summing the specific distributor columns and then pivoting to 'long' format.
+aum_by_distributor <- df %>% # Use 'df' as input
+  mutate(Month_Year = floor_date(DATE, "month")) %>%
+  filter(!is.na(Month_Year)) %>% #Remove rows where Month_Year couldn't be determined
+  group_by(Month_Year) %>%
+  summarise(
+    Direct_AUM = sum(`THROUGH DIRECT PLAN`, na.rm = TRUE),
+    Associate_AUM = sum(`THROUGH ASSOCIATE DISTRIBUTORS`, na.rm = TRUE),
+    Non_Associate_AUM = sum(`THROUGH NON ASSOCIATE DISTRIBUTORS`, na.rm = TRUE),
+    .groups = 'drop'
+  ) %>%
+  # Convert to 'long' format for easier plotting and consistent forecasting structure
+  pivot_longer(
+    cols = c(Direct_AUM, Associate_AUM, Non_Associate_AUM),
+    names_to = "Distributor_Type", # New column to hold the name of the distributor type
+    values_to = "Total_AUM"       # New column to hold the AUM value for that distributor type
+  ) %>%
+  # Make Distributor_Type names more readable for plotting
+  mutate(
+    Distributor_Type = case_when(
+      Distributor_Type == "Direct_AUM" ~ "Direct Plan",
+      Distributor_Type == "Associate_AUM" ~ "Associate",
+      Distributor_Type == "Non_Associate_AUM" ~ "Non-Associate",
+      TRUE ~ Distributor_Type # Fallback for any unexpected names
+    )
+  ) %>%
+  arrange(Distributor_Type, Month_Year) # Ensure chronological order for forecasting
+
+print("Aggregated AUM by Distributor Type:")
+print(aum_by_distributor)
+
+# C. Aggregate Total AUM by Scheme Category 
+aum_by_scheme_category <- df %>% # Use 'df' as input
+  mutate(Month_Year = floor_date(DATE, "month")) %>%
+  filter(!is.na(Month_Year)) %>% #Remove rows where Month_Year couldn't be determined
+  # Filter out "UNKNOWN SCHEME CATEGORY" entries
+  filter(`SCHEME CATEGORY` != "UNKNOWN SCHEME CATEGORY") %>%
+  group_by(Month_Year, `SCHEME CATEGORY`) %>%
+  summarise(Total_AUM = sum(`Grand Total`, na.rm = TRUE), .groups = 'drop') %>%
+  arrange(`SCHEME CATEGORY`, Month_Year) # Ensure chronological order for forecasting
+
+print("Aggregated AUM by Scheme Category:")
+print(aum_by_scheme_category)
+
+# D. Aggregate Total AUM by Scheme Sub-Category (UPDATED: Filter out UNKNOWN and NA Month_Year)
+aum_by_scheme_subcategory <- df %>% # Use 'df' as input
+  mutate(Month_Year = floor_date(DATE, "month")) %>%
+  filter(!is.na(Month_Year)) %>% # NEW: Remove rows where Month_Year couldn't be determined
+  # Filter out "UNKNOWN SCHEME SUB-CATEGORY" entries
+  filter(`SCHEME SUB-CATEGORY` != "UNKNOWN SCHEME SUB-CATEGORY") %>%
+  group_by(Month_Year, `SCHEME SUB-CATEGORY`) %>%
+  summarise(Total_AUM = sum(`Grand Total`, na.rm = TRUE), .groups = 'drop') %>%
+  arrange(`SCHEME SUB-CATEGORY`, Month_Year) # Ensure chronological order for forecasting
+
+print("Aggregated AUM by Scheme Sub-Category:")
+print(aum_by_scheme_subcategory)
+
+
+## ---- 07_Visualize_Historical_Trends ----
+# This section creates plots to visualize the historical AUM trends (April, May, June 2025).
+
+# A. Plot Total AUM by Fund House (no zoom)
+ggplot(aum_by_fundhouse, aes(x = Month_Year, y = Total_AUM, color = `FUND HOUSE`, group = `FUND HOUSE`)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 3) +
+  labs(
+    title = "Historical Total AUM by Fund House (Apr-Jun 2025)",
+    x = "Month",
+    y = "Total AUM",
+    color = "Fund House"
+  ) +
+  scale_x_date(date_breaks = "1 month", date_labels = "%b %Y") +
+  scale_y_continuous(labels = scales::comma) + # Default scale
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+# B. Plot Historical Total AUM by Distributor Type
+ggplot(aum_by_distributor, aes(x = Month_Year, y = Total_AUM, color = Distributor_Type, group = Distributor_Type)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 3) +
+  labs(
+    title = "Historical Total AUM by Distributor Type (Apr-Jun 2025)",
+    x = "Month",
+    y = "Total AUM",
+    color = "Distributor Type"
+  ) +
+  scale_x_date(date_breaks = "1 month", date_labels = "%b %Y") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+#C. Plot Historical Total AUM by Scheme Category
+ggplot(aum_by_scheme_category, aes(x = Month_Year, y = Total_AUM, color = `SCHEME CATEGORY`, group = `SCHEME CATEGORY`)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 3) +
+  labs(
+    title = "Historical Total AUM by Scheme Category (Apr-Jun 2025)",
+    x = "Month",
+    y = "Total AUM",
+    color = "Scheme Category"
+  ) +
+  scale_x_date(date_breaks = "1 month", date_labels = "%b %Y") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# D. Plot Historical Total AUM by Scheme Sub-Category
+ggplot(aum_by_scheme_subcategory, aes(x = Month_Year, y = Total_AUM, color = `SCHEME SUB-CATEGORY`, group = `SCHEME SUB-CATEGORY`)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 3) +
+  labs(
+    title = "Historical Total AUM by Scheme Sub-Category (Apr-Jun 2025)",
+    x = "Month",
+    y = "Total AUM",
+    color = "Scheme Sub-Category"
+  ) +
+  scale_x_date(date_breaks = "1 month", date_labels = "%b %Y") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+## ---- 08_Forecast_Next_Three_Months ----
+# This section calculates the forecast for July and August 2025
+# based on the average monthly growth rate from the historical data.
+
+# Define the future months we want to forecast for (July and August)
+future_months <- ymd(c("2025-07-01", "2025-08-01"))
+
+# --- Forecasting AUM by Fund House ---
+
+# 1. Calculate the average monthly growth rate for each fund house
+growth_rates_fundhouse <- aum_by_fundhouse %>%
+  arrange(`FUND HOUSE`, Month_Year) %>%
+  group_by(`FUND HOUSE`) %>%
+  mutate(
+    Previous_AUM = lag(Total_AUM),
+    Growth_Rate = (Total_AUM - Previous_AUM) / Previous_AUM
+  ) %>%
+  filter(!is.na(Growth_Rate), !is.infinite(Growth_Rate)) %>%
+  summarise(Avg_Growth_Rate = mean(Growth_Rate, na.rm = TRUE), .groups = 'drop') %>%
+  mutate(Avg_Growth_Rate = replace_na(Avg_Growth_Rate, 0))
+
+# 2. Get the last known AUM (June 2025) for each fund house to start the projection
+forecast_data_fundhouse <- aum_by_fundhouse %>%
+  filter(Month_Year == max(Month_Year)) %>%
+  select(`FUND HOUSE`, Last_AUM = Total_AUM) %>%
+  left_join(growth_rates_fundhouse, by = "FUND HOUSE")
+
+# 3. Project AUM for July and August iteratively
+for (i in 1:length(future_months)) {
+  forecast_data_fundhouse <- forecast_data_fundhouse %>%
+    mutate(
+      Month_Year_forecast = future_months[i],
+      Forecasted_AUM = Last_AUM * (1 + Avg_Growth_Rate),
+      Last_AUM = Forecasted_AUM
+    )
+  current_month_for_binding <- forecast_data_fundhouse %>%
+    select(Month_Year = Month_Year_forecast, `FUND HOUSE`, Total_AUM = Forecasted_AUM)
+  aum_by_fundhouse <- bind_rows(aum_by_fundhouse, current_month_for_binding)
+  forecast_data_fundhouse <- forecast_data_fundhouse %>%
+    select(`FUND HOUSE`, Last_AUM, Avg_Growth_Rate)
+}
+
+# --- Forecasting AUM by Distributor Type ---
+
+# 1. Calculate the average monthly growth rate for each distributor type
+growth_rates_distributor <- aum_by_distributor %>%
+  arrange(Distributor_Type, Month_Year) %>%
+  group_by(Distributor_Type) %>%
+  mutate(
+    Previous_AUM = lag(Total_AUM),
+    Growth_Rate = (Total_AUM - Previous_AUM) / Previous_AUM
+  ) %>%
+  filter(!is.na(Growth_Rate), !is.infinite(Growth_Rate)) %>%
+  summarise(Avg_Growth_Rate = mean(Growth_Rate, na.rm = TRUE), .groups = 'drop') %>%
+  mutate(Avg_Growth_Rate = replace_na(Avg_Growth_Rate, 0))
+
+# 2. Get the last known AUM (June 2025) for each distributor type to start the projection
+forecast_data_distributor <- aum_by_distributor %>%
+  filter(Month_Year == max(Month_Year)) %>%
+  select(Distributor_Type, Last_AUM = Total_AUM) %>%
+  left_join(growth_rates_distributor, by = "Distributor_Type")
+
+# 3. Project AUM for July and August iteratively
+for (i in 1:length(future_months)) {
+  forecast_data_distributor <- forecast_data_distributor %>%
+    mutate(
+      Month_Year_forecast = future_months[i],
+      Forecasted_AUM = Last_AUM * (1 + Avg_Growth_Rate),
+      Last_AUM = Forecasted_AUM
+    )
+  current_month_for_binding <- forecast_data_distributor %>%
+    select(Month_Year = Month_Year_forecast, Distributor_Type, Total_AUM = Forecasted_AUM)
+  aum_by_distributor <- bind_rows(aum_by_distributor, current_month_for_binding)
+  forecast_data_distributor <- forecast_data_distributor %>%
+    select(Distributor_Type, Last_AUM, Avg_Growth_Rate)
+}
+
+# --- Forecasting AUM by Scheme Category ---
+
+# 1. Calculate the average monthly growth rate for each scheme category
+growth_rates_scheme_category <- aum_by_scheme_category %>%
+  arrange(`SCHEME CATEGORY`, Month_Year) %>%
+  group_by(`SCHEME CATEGORY`) %>%
+  mutate(
+    Previous_AUM = lag(Total_AUM),
+    Growth_Rate = (Total_AUM - Previous_AUM) / Previous_AUM
+  ) %>%
+  filter(!is.na(Growth_Rate), !is.infinite(Growth_Rate)) %>%
+  summarise(Avg_Growth_Rate = mean(Growth_Rate, na.rm = TRUE), .groups = 'drop') %>%
+  mutate(Avg_Growth_Rate = replace_na(Avg_Growth_Rate, 0))
+
+# 2. Get the last known AUM (June 2025) for each scheme category
+forecast_data_scheme_category <- aum_by_scheme_category %>%
+  filter(Month_Year == max(Month_Year)) %>%
+  select(`SCHEME CATEGORY`, Last_AUM = Total_AUM) %>%
+  left_join(growth_rates_scheme_category, by = "SCHEME CATEGORY")
+
+# 3. Project AUM for July and August iteratively
+for (i in 1:length(future_months)) {
+  forecast_data_scheme_category <- forecast_data_scheme_category %>%
+    mutate(
+      Month_Year_forecast = future_months[i],
+      Forecasted_AUM = Last_AUM * (1 + Avg_Growth_Rate),
+      Last_AUM = Forecasted_AUM
+    )
+  current_month_for_binding <- forecast_data_scheme_category %>%
+    select(Month_Year = Month_Year_forecast, `SCHEME CATEGORY`, Total_AUM = Forecasted_AUM)
+  aum_by_scheme_category <- bind_rows(aum_by_scheme_category, current_month_for_binding)
+  forecast_data_scheme_category <- forecast_data_scheme_category %>%
+    select(`SCHEME CATEGORY`, Last_AUM, Avg_Growth_Rate)
+}
+
+# --- Forecasting AUM by Scheme Sub-Category ---
+
+# 1. Calculate the average monthly growth rate for each scheme sub-category
+growth_rates_scheme_subcategory <- aum_by_scheme_subcategory %>%
+  arrange(`SCHEME SUB-CATEGORY`, Month_Year) %>%
+  group_by(`SCHEME SUB-CATEGORY`) %>%
+  mutate(
+    Previous_AUM = lag(Total_AUM),
+    Growth_Rate = (Total_AUM - Previous_AUM) / Previous_AUM
+  ) %>%
+  filter(!is.na(Growth_Rate), !is.infinite(Growth_Rate)) %>%
+  summarise(Avg_Growth_Rate = mean(Growth_Rate, na.rm = TRUE), .groups = 'drop') %>%
+  mutate(Avg_Growth_Rate = replace_na(Avg_Growth_Rate, 0))
+
+# 2. Get the last known AUM (June 2025) for each scheme sub-category
+forecast_data_scheme_subcategory <- aum_by_scheme_subcategory %>%
+  filter(Month_Year == max(Month_Year)) %>%
+  select(`SCHEME SUB-CATEGORY`, Last_AUM = Total_AUM) %>%
+  left_join(growth_rates_scheme_subcategory, by = "SCHEME SUB-CATEGORY")
+
+# 3. Project AUM for July and August iteratively
+for (i in 1:length(future_months)) {
+  forecast_data_scheme_subcategory <- forecast_data_scheme_subcategory %>%
+    mutate(
+      Month_Year_forecast = future_months[i],
+      Forecasted_AUM = Last_AUM * (1 + Avg_Growth_Rate),
+      Last_AUM = Forecasted_AUM
+    )
+  current_month_for_binding <- forecast_data_scheme_subcategory %>%
+    select(Month_Year = Month_Year_forecast, `SCHEME SUB-CATEGORY`, Total_AUM = Forecasted_AUM)
+  aum_by_scheme_subcategory <- bind_rows(aum_by_scheme_subcategory, current_month_for_binding)
+  forecast_data_scheme_subcategory <- forecast_data_scheme_subcategory %>%
+    select(`SCHEME SUB-CATEGORY`, Last_AUM, Avg_Growth_Rate)
+}
+
+
+# Display the final forecasted results for July and August
+cat("--- Forecasted AUM by Fund House (July, Aug 2025) ---\n")
+aum_by_fundhouse %>% filter(Month_Year %in% future_months) %>% print(n = Inf)
+
+cat("\n--- Forecasted AUM by Distributor Type (July, Aug 2025) ---\n")
+aum_by_distributor %>% filter(Month_Year %in% future_months) %>% print(n = Inf)
+
+cat("\n--- Forecasted AUM by Scheme Category (July, Aug 2025) ---\n")
+aum_by_scheme_category %>% filter(Month_Year %in% future_months) %>% print(n = Inf)
+
+cat("\n--- Forecasted AUM by Scheme Sub-Category (July, Aug 2025) ---\n")
+aum_by_scheme_subcategory %>% filter(Month_Year %in% future_months) %>% print(n = Inf)
+
+
+## ---- 09_Visualize_Historical_and_Forecasted_Trends ----
+# This section plots both the historical data and the newly generated forecasts.
+
+# Calculate overall min/max for DSP and TATA for the combined historical + forecasted data
+# This uses the 'aum_by_fundhouse' which now contains historical AND forecasted data.
+dsp_tata_combined_aum_for_limits <- aum_by_fundhouse %>%
+  filter(`FUND HOUSE` %in% c("DSP MUTUAL FUND", "TATA MUTUAL FUND"))
+
+min_aum_dsp_tata_combined_zoom <- min(dsp_tata_combined_aum_for_limits$Total_AUM, na.rm = TRUE)
+max_aum_dsp_tata_combined_zoom <- max(dsp_tata_combined_aum_for_limits$Total_AUM, na.rm = TRUE)
+
+padding_combined_fundhouse_y_low <- min_aum_dsp_tata_combined_zoom * 0.98
+padding_combined_fundhouse_y_high <- max_aum_dsp_tata_combined_zoom * 1.02
+
+# A. Plot Total AUM by Fund House (Historical + Forecast) - No Zoom
+ggplot(aum_by_fundhouse, aes(x = Month_Year, y = Total_AUM, color = `FUND HOUSE`, group = `FUND HOUSE`)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 3) +
+  labs(
+    title = "Total AUM by Fund House: Historical and Forecast (Apr-Aug 2025)",
+    x = "Month",
+    y = "Total AUM",
+    color = "Fund House"
+  ) +
+  scale_x_date(date_breaks = "1 month", date_labels = "%b %Y") +
+  scale_y_continuous(labels = scales::comma) + # Default scale
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# A.1 Plot Total AUM by Fund House (Historical + Forecast) - Zoomed for DSP & TATA
+ggplot(aum_by_fundhouse, aes(x = Month_Year, y = Total_AUM, color = `FUND HOUSE`, group = `FUND HOUSE`)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 3) +
+  labs(
+    title = "Total AUM by Fund House: Historical and Forecast (Apr-Aug 2025)",
+    subtitle = "Y-axis zoomed to show DSP and TATA Mutual Funds range",
+    x = "Month",
+    y = "Total AUM",
+    color = "Fund House"
+  ) +
+  scale_x_date(date_breaks = "1 month", date_labels = "%b %Y") +
+  scale_y_continuous(labels = scales::comma, limits = c(padding_combined_fundhouse_y_low, padding_combined_fundhouse_y_high)) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# B. Plot Total AUM by Distributor Type (Historical + Forecast)
+ggplot(aum_by_distributor, aes(x = Month_Year, y = Total_AUM, color = Distributor_Type, group = Distributor_Type)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 3) +
+  labs(
+    title = "Total AUM by Distributor Type: Historical and Forecast (Apr-Aug 2025)",
+    x = "Month",
+    y = "Total AUM",
+    color = "Distributor Type"
+  ) +
+  scale_x_date(date_breaks = "1 month", date_labels = "%b %Y") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# C. Plot Total AUM by Scheme Category (Historical + Forecast) (NEW ADDITION)
+ggplot(aum_by_scheme_category, aes(x = Month_Year, y = Total_AUM, color = `SCHEME CATEGORY`, group = `SCHEME CATEGORY`)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 3) +
+  labs(
+    title = "Total AUM by Scheme Category: Historical and Forecast (Apr-Aug 2025)",
+    x = "Month",
+    y = "Total AUM",
+    color = "Scheme Category"
+  ) +
+  scale_x_date(date_breaks = "1 month", date_labels = "%b %Y") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# D. Plot Total AUM by Scheme Sub-Category (Historical + Forecast) (NEW ADDITION)
+ggplot(aum_by_scheme_subcategory, aes(x = Month_Year, y = Total_AUM, color = `SCHEME SUB-CATEGORY`, group = `SCHEME SUB-CATEGORY`)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 3) +
+  labs(
+    title = "Total AUM by Scheme Sub-Category: Historical and Forecast (Apr-Aug 2025)",
+    x = "Month",
+    y = "Total AUM",
+    color = "Scheme Sub-Category"
+  ) +
+  scale_x_date(date_breaks = "1 month", date_labels = "%b %Y") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+## ---- 10_Export_Forecasted_Data ----
+# This section exports the forecasted AUM data (July & August 2025) to an Excel file.
+
+# install.packages("writexl") 
+library(writexl)
+library(dplyr)
+
+
+# --- I changed the variable names- this is uneeded and due for a change.
+
+# For Fund House forecasts
+forecasted_aum_fundhouse_only <- aum_by_fundhouse 
+
+# For Distributor Type forecasts
+forecasted_aum_distributor_only <- aum_by_distributor 
+
+# For Scheme Category forecasts (NEW ADDITION)
+forecasted_aum_scheme_category_only <- aum_by_scheme_category 
+
+# For Scheme Sub-Category forecasts (NEW ADDITION)
+forecasted_aum_scheme_subcategory_only <- aum_by_scheme_subcategory 
+
+
+# --- Step 2: Export to Excel ---
+
+# Define the file path and name for your Excel file
+# !!! IMPORTANT: CHANGE "C:/Your/Desired/Path/" to the actual folder path where you want to save the file !!!
+excel_file_path <- "C:/Users/vidya/OneDrive/Desktop/all_forecasted_aum_july_august_2025.xlsx"
+
+# Create a list of data frames to export. Each item in this list will become a separate sheet in your Excel file.
+list_of_dfs_to_export <- list(
+  Fund_House_Forecasts = forecasted_aum_fundhouse_only,
+  Distributor_Type_Forecasts = forecasted_aum_distributor_only,
+  Scheme_Category_Forecasts = forecasted_aum_scheme_category_only,
+  Scheme_SubCategory_Forecasts = forecasted_aum_scheme_subcategory_only
+)
+
+# Write the list of data frames to a single Excel file
+write_xlsx(list_of_dfs_to_export, excel_file_path)
+
+print(paste("All forecasted AUM data for July and August 2025 exported to:", excel_file_path))
